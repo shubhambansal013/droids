@@ -5,7 +5,7 @@ var path = require('path');
 var promise = require('bluebird');
 promise.promisifyAll(fs);
 var logging = require('../logger');
-var data_dir = path.join(__dirname, '../data');
+var data_dir = path.join(__dirname, '../../data');
 
 var url = 'http://localhost:9000/hello';
 var options = {
@@ -38,3 +38,4 @@ request(options, function(error, body, response){
   }
   logging.info({REPONSE : response});
 });
+
