@@ -37,30 +37,9 @@ function calculateHash(cb){
 	})
 	.catch(function(error){
 	  logging.error({ERROR : error.message});
-	  return error;
+	  return cb(error);
 	})
 }
-
-
-// connection.on('syncHash', function(data2){
-// 	var missingKeys = [];
-// 	for(var key in data2){
-// 		// logging.info(data2[key]);
-// 		if(!~data[key]){
-// 			logging.info(key+" exists");
-// 			missingKeys.push(key);
-// 		}
-// 	}
-// 	connection.emit('getFile', key);
-// 	connection.on('file', function(filesObj){
-// 		for(var key in filesObj){
-// 		logging.info(filesObj[key]);
-// 			if(~filesObj[key]){
-// 				// logging.info(filesObj[key]);
-// 			}
-// 		}
-// 	});
-// })
 
 connection.emit('addUser', process.env.USER);
 connection.emit('pair', process.env.PAIR);
@@ -73,25 +52,27 @@ calculateHash(function(error){
 	connection.emit('storeHash', data);
 })
 
-
-
-
-
 connection.on('sendFile', function(fileObj){
 	var files = {};
 	for(var key in fileObj){
 		var filePath = path.join(data_dir, fileObj[key]);
 		files[fileObj[key]] = fs.readFileSync(filePath, 'utf8'); 
 	}
-	connection.emmit('files', files);
+	connection.emit('files', files);
 });
 
-connection.on('recieve', function(files){
+connection.on('receive', function(files){
+	logging.info('Received files from server');
 	for(var key in files){
 		var filePath = path.join(data_dir, key);
+		logging.info('Writing File :', key);
 		fs.writeFileSync(filePath, files[key]);
 	}
-	calculateHash(function(){
+	calculateHash(function(error){
+		if(error){
+			return logging.error('ERROR : ',error.message);
+		}
+		logging.info('Sending storeHash Event');
 		connection.emit('storeHash', data);
 	});
 })
