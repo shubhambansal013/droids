@@ -3,6 +3,7 @@ var path = require('path');
 var promise = require('bluebird');
 var recursive = require('recursive-readdir');
 var mkdirp = require('mkdirp');
+var md5 = require('md5-file');
 
 var fs = require('fs');
 var logging = require('../logger');
@@ -15,6 +16,7 @@ var data_dir = (process.env.DATA_DIR, data_dir_default);
 promise.promisifyAll(fs);
 var recursiveAsync = promise.promisify(recursive);
 var mkdirpAsync = promise.promisify(mkdirp);
+var md5Async = promise.promisify(md5);
 
 var connection = io.connect('http://localhost:9000');
 
@@ -70,7 +72,7 @@ connection.on('receive',function(files){
 	})()
 	.then(function(){
 		console.log('Sync Done');
-	connection.close();
+	// connection.close();
 	})
 	.catch(function(error){
 		logging.error('ERROR', error.message);
@@ -122,7 +124,12 @@ function getFileInfo(cb){
 			var info = yield fs.statAsync.call(null, files[i]);
 			// logging.info('info', info);
 			logging.info('typeof', typeof(info.mtime));
-			data[filesPath[i]] = info.mtime;
+
+			var payload = {};
+			payload.last_modified = info.mtime;
+			payload.md5 = yield md5Async.call(null, files[i]);
+
+			data[filesPath[i]] = payload;
 			logging.info('data', files[i], data[files[i]]);
 		}
 		return data;
