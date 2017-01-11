@@ -5,28 +5,14 @@ var promise = require('bluebird');
 var socket_io = require('socket.io');
 var bodyParser = require('body-parser');
 
-var logger = require('../logger');
-var sync = require('./routes/sync');
+var logging = require('../logger');
 
 var app = express();
 
-// promise.promisifyAll(socket);
-
+//Server is running on port 9000 by default
 var port = process.env.PORT || 9000;
 app.set('port', port)
 app.use(morgan('dev'));
-app.use(bodyParser.json({limit : '200mb'}));
-app.use(bodyParser.urlencoded({limit : '20mb', extended : true}));
-app.use(function (req, res, next){
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  next();
-});
-
-app.get('/hello', (req, res) => {
-  logger.info('GET : hello');
-  return res.send('whatup');
-});
-
 
 var listener = app.listen(port, () => {
 	console.log("Express is listening on port" );
@@ -34,96 +20,112 @@ var listener = app.listen(port, () => {
 
 var io = socket_io.listen(listener);
 
-
-
 var users = {}; //Object storing the userName : socket.id of users connected
-var hash = {}; // Object storing the userName : { md5 : fileName, ...}
+var userFiles = {}; // Object storing the userName : { fileName : last_modified_time, ...}
 
 io.on('connection', function(socket){
 	promise.promisifyAll(socket);
 	
 	console.log(socket.id + ' just connected');
-	
+
+	//Fetch all info from client in case of server restart
+	io.emit('restart', null);
+
+	//Testing function
 	socket.on('hi', function(data){
 		console.log(data);
 	});
 
 	//Add User to user object
 	socket.on('addUser', function(user){
-		logger.info('added user');
+		logging.info('added user');
 		socket.user = user;
 		users[user] = socket.id;
 	});
 
 	//Add pair to socket object
 	socket.on('pair', function(pair){
-		logger.info('added pair');
+		logging.info('added pair');
 		socket.pair = pair;
 	});
 
-	//Store MD5 of file of user to hash object
-	socket.on('storeHash', function(data){
-		hash[socket.user] = data;
-		logger.info({FILES : hash[socket.user]}, {USER : socket.user}, {PAIR : socket.pair});
-		socket.emit('hashStored');
+	//store file data in userFiles
+	socket.on('storeData', function(data){
+		userFiles[socket.user] = data;
+		// logging.info({FILES : userFiles})
+		
+		//Send the client that data has been stored on server.
+		socket.emit('metaDataStored');
 		try{
-			logger.info('data', {'DATA' : hash});
-
 			//Check if pair is online
 			if(!socket.pair){
 				var err = new Error('No pair info found');
-				// logger.error({ERROR : err.message});
+				// logging.error({ERROR : err.message});
 				throw err;
-			}
-			logger.info('users', users);
-			
-			//Emit event to clients about online info.
-			io.to(users[socket.user]).emit('pairOnline', socket.pair+' is Online.');
-			io.to(users[socket.pair]).emit('pairOnline', socket.user+' is Online.');
-			
+			}			
+
 			if(users[socket.pair]){
-				logger.info('Checking files to transfer');
-				var filesUser = {};
-				var filesPair = {};
+
+				//Emit event to clients about online info.
+				io.to(users[socket.user]).emit('pairOnline', socket.pair+' is Online.');
+				io.to(users[socket.pair]).emit('pairOnline', socket.user+' is Online.');
+				
+				logging.info('Checking files to transfer');
+				var getFromUser = [];
+				var getFromPair = [];
 				
 				//Add the files to be transfered to pair in filesUser
-				for(var key in hash[socket.pair]){
-					if(!hash[socket.user][key]){
-						filesUser[key] = hash[socket.pair][key]
+				for(var key in userFiles[socket.pair]){
+					// check if file does not exists with user
+					if(!userFiles[socket.user][key]){
+						getFromPair.push(key);
+					}
+					// check if the file has been modified by the pair lately
+					else if(userFiles[socket.user][key] < userFiles[socket.pair][key]){
+						getFromPair.push(key);
 					}
 				}
 				
 				//Add the files to be transfered to user in filesPair
-				for(var key in hash[socket.user]){
-					if(!hash[socket.pair][key]){
-						filesPair[key] = hash[socket.user][key]
+				for(var key in userFiles[socket.user]){
+					// check if file does not exists with pair
+					if(!userFiles[socket.pair][key]){
+						getFromUser.push(key);
+					}
+					// check if the file has been modified by the user lately
+					else if(userFiles[socket.pair][key] < userFiles[socket.user][key]){
+						getFromUser.push(key);
 					}
 				}
-				logger.info('To_User', filesUser);
-				logger.info('To_Pair', filesPair);
-				if(!filesUser.length && !filesPair.length){
-					logger.info('sending complete event');
+				// logging.info('Get From User', getFromUser);
+				// logging.info('Get From Pair', getFromPair);
+
+				if(!getFromUser.length && !getFromPair.length){
+					logging.info('Sending complete event');
 					//Emit complete event in case of files sent to be sent 
 					io.to(users[socket.user]).emit('complete');
 					io.to(users[socket.pair]).emit('complete');
 				}
 				else{
 					//Request users for files that their pair dont have
-					logger.info('Requesting files from clients');
-					if(Object.keys(filesUser).length)
-						io.to(users[socket.user]).emit('sendFile', filesUser);
+					logging.info('Requesting files from clients');
 
-					if(Object.keys(filesPair).length)
-						io.to(users[socket.pair]).emit('sendFile', filesPair);
+					//Fetching files to be transfered to their pairs from users
+
+					if(getFromUser.length)
+						io.to(users[socket.user]).emit('sendFile', getFromUser);
+
+					if(getFromPair.length)
+						io.to(users[socket.pair]).emit('sendFile', getFromPair);
 				}
 				
 			}
 			else{
-				throw new Error('Pair not connected');
+				socket.emit('offline', 'pair not connected');
 			}
 		}
 		catch(error){
-			logger.error('Error', error.message);
+			logging.error('Error', error.message);
 			socket.emit('error', error.message);
 		}
 	});
@@ -133,9 +135,9 @@ io.on('connection', function(socket){
 	});
 
 	socket.on('disconnect', function(){
-		console.log(socket.id + " just disconnected");
+		logging.info(socket.id + " just disconnected");
 		delete users[socket.user];
-		delete hash[socket.user];
+		delete userFiles[socket.user];
 	});
 });
 
