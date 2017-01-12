@@ -25,47 +25,36 @@ var users = {};
 var userFiles = {};
 
 //Fetch all info from client in case of server restart
-io.emit('restart', null);
+io.emit('restart');
 
 //Event for connection with the clients
 io.on('connection', function(socket){
 
 	logging.info(socket.id + ' just connected');
 	
-	//Test event
-	socket.on('hi', function(data){
-		console.log(data);
-	});
-
 	//Add User to user object
 	socket.on('addUser', function(user){
-		logging.info('added user');
-		logging.info('files', userFiles);
 		socket.user = user;
 		users[user] = socket.id;
 	});
 
 	//Add pair to socket object
 	socket.on('pair', function(pair){
-		logging.info('added pair');
 		socket.pair = pair;
 	});
 
 	socket.on('storeData', function(data){
-		logging.info("*************data*************",data);
 		//store file data in userFiles
 		data = JSON.parse(data);
 		userFiles[socket.user] = data || {};
 
-		console.log("***********USER***********",userFiles);
 		//Send the client that data has been stored on server.
-		socket.emit('metaDataStored');
+		socket.emit('metaDataStored', 'Meta data stored on server');
 
 		var gen = startSync.bind(null, io, socket, users, userFiles);
 
 		promise.coroutine(gen)()
 			.catch(function(error){
-				// logging.error('error', error);
 				emitErrorEvent(socket, error);
 			})
 	});
@@ -76,7 +65,6 @@ io.on('connection', function(socket){
 	});
 
 	socket.on('disconnect', function(){
-		logging.info(socket.id + " just disconnected");
 		if(users[socket.pair]){
 			io.to(socket[socket.pair]).emit('offline', 'Pair has gone offline');
 		}
@@ -85,7 +73,7 @@ io.on('connection', function(socket){
 	});
 });
 
-
+// Perform the sync task
 function *startSync(io, socket, users, userFiles){
 
 	yield validatePairInfoAsync.call(null, socket);
@@ -100,9 +88,7 @@ function *startSync(io, socket, users, userFiles){
 	// get the filpath inside the data directory that is required by their pairs
 	var getFromUser = filesToFetch(userFiles, pair, user);
 	var getFromPair = filesToFetch(userFiles, user, pair);
-
-	logging.info('files with server', userFiles);
-
+	
 	// If no files are to be transferred emit sync complete event
 	if(!getFromUser.length && !getFromPair.length){
 		logging.info('Sending complete event');
@@ -127,11 +113,9 @@ var checkPairOnlineAsync = promise.promisify(checkPairOnline);
 
 //check if the pair in online
 function checkPairOnline(users, socket, cb){
-	logging.info('users', users);
 	if(!users[socket.pair]){
 		var err = new Error('Pair offline');
 		err.event = 'offline';
-		// console.error('offline', err);
 		return cb(err);
 	}
 	return cb();
@@ -141,10 +125,8 @@ var validatePairInfoAsync = promise.promisify(validatePairInfo);
 
 // check if socket has the pair name
 function validatePairInfo(socket, cb){
-	// console.log(socket.pair);
 	if(!socket.pair) {
 		var err = new Error('No pair info found');
-		// logging.error({ERROR : err.message});
 		return cb(err);
 	}
 	return cb();
