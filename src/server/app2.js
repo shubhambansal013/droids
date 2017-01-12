@@ -3,131 +3,171 @@ var request = require('request');
 var morgan = require('morgan');
 var promise = require('bluebird');
 var socket_io = require('socket.io');
-var bodyParser = require('body-parser');
 
-var logger = require('../logger');
-var sync = require('./routes/sync');
+var logging = require('../logger');
 
 var app = express();
 
-// promise.promisifyAll(socket);
-
+//Server is running on port 9000 by default
 var port = process.env.PORT || 9000;
-app.set('port', port)
+app.set('port', port);
 app.use(morgan('dev'));
-app.use(bodyParser.json({limit : '200mb'}));
-app.use(bodyParser.urlencoded({limit : '20mb', extended : true}));
-app.use(function (req, res, next){
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  next();
-})
-
-app.get('/hello', (req, res) => {
-  logger.info('GET : hello');
-  return res.send('whatup');
-});
-
 
 var listener = app.listen(port, () => {
-	console.log("Express is listening on port" )
+	console.log("Express is listening on port" );
 });
+
 var io = socket_io.listen(listener);
 
+//Object storing the userName : socket.id of users connected
 var users = {};
-var hash = {};
+// Object storing the userName : { fileName : last_modified_time, ...}
+var userFiles = {};
 
+//Fetch all info from client in case of server restart
+io.emit('restart');
+
+//Event for connection with the clients
 io.on('connection', function(socket){
-	promise.promisifyAll(socket);
+
+	logging.info(socket.id + ' just connected');
 	
-	console.log(socket.id + ' just connected');
-	
-	socket.on('hi', function(data){
-		console.log(data);
-	});
-	
+	//Add User to user object
 	socket.on('addUser', function(user){
-		logger.info('added user');
 		socket.user = user;
 		users[user] = socket.id;
 	});
+
+	//Add pair to socket object
 	socket.on('pair', function(pair){
-		logger.info('added pair');
 		socket.pair = pair;
-	})
-	socket.on('storeHash', function(data){
-		hash[socket.user] = data;
-		logger.info({FILES : hash[socket.user]}, {USER : socket.user}, {PAIR : socket.pair});
-		socket.emit('hashStored');
-		try{
-			logger.info('data', {'DATA' : hash});
-			if(!socket.pair){
-				var err = new Error('No pair info found');
-				// logger.error({ERROR : err.message});
-				throw err;
-			}
-			logger.info('users', users);
-			if(users[socket.pair]){
-				logger.info('Checking files to transfer');
-				var filesUser = {};
-				var filesPair = {};
-				for(var key in hash[socket.pair]){
-					if(!~hash[socket.user][key]){
-						filesUser[key] = hash[socket.pair][key]
-					}
-				}
-				for(var key in hash[socket.user]){
-					if(!~hash[socket.pair][key]){
-						filesPair[key] = hash[socket.user][key]
-					}
-				}
-				logger.info('To_User', filesUser);
-				logger.info('To_Pair', filesPair);
-				if(!filesUser.length && !filesPair.length){
-					logger.info('sending complete event');
-					io.to(users[socket.user]).emit('complete');
-					io.to(users[socket.pair]).emit('complete');
-				}
-				else{
-					logger.info('Requesting send files');
-					io.to(users[socket.user]).emit('sendFile', filesUser);
-					io.to(users[socket.pair]).emit('sendFile', filesPair);	
-				}
-				
-			}
-			else{
-				throw new Error('Pair not connected');
-			}
-		}
-		catch(error){
-			logger.error('Error', error.message);
-			socket.emit('error', error.message);
-		}
 	});
 
-	socket.on('files', function(files){
-		io.sockets.in(socket.pair).emit('receive', files);
+	socket.on('storeData', function(data){
+		//store file data in userFiles
+		data = JSON.parse(data);
+		userFiles[socket.user] = data || {};
+
+		//Send the client that data has been stored on server.
+		socket.emit('metaDataStored', 'Meta data stored on server');
+
+		var gen = startSync.bind(null, io, socket, users, userFiles);
+
+		promise.coroutine(gen)()
+			.catch(function(error){
+				emitErrorEvent(socket, error);
+			})
 	});
-	// promise.coroutine(function *(){
-	// 	logger.info('syncing');
-	// 	var data = yield socket.onAsync('checkHash');
-	// 	hash[socket.user] = data;
-	// 	io.emit('syncHash', data);
-	// 	return promise.resolve(data);
-	// })()
-	// .then(function(data){
-	// 	logger.info({DATA : data});
-	// })
-	// .catch(function(error){
-	// 	logger.error({ERROR : error.message});
-	// })
 	
-	socket.on('disconnect', function(){
-		console.log(socket.id + " just disconnected");
-		delete users[socket.user];
-		delete hash[socket.user];
+	//Send files received from users to their pairs
+	socket.on('files', function(files){
+		io.to(users[socket.pair]).emit('receive', files);
 	});
-})
 
-function startSync(user, pair){
+	socket.on('disconnect', function(){
+		if(users[socket.pair]){
+			io.to(socket[socket.pair]).emit('offline', 'Pair has gone offline');
+		}
+		delete users[socket.user];
+		delete userFiles[socket.user];
+	});
+});
 
+// Perform the sync task
+function *startSync(io, socket, users, userFiles){
+
+	yield validatePairInfoAsync.call(null, socket);
+
+	yield checkPairOnlineAsync.call(null, users, socket);
+
+	yield emitOnlineStatusAsync.call(null, io,socket, users);
+
+	var user = socket.user;
+	var pair = socket.pair;
+
+	// get the filpath inside the data directory that is required by their pairs
+	var getFromUser = filesToFetch(userFiles, pair, user);
+	var getFromPair = filesToFetch(userFiles, user, pair);
+	
+	// If no files are to be transferred emit sync complete event
+	if(!getFromUser.length && !getFromPair.length){
+		logging.info('Sending complete event');
+		//Emit complete event in case of files sent to be sent 
+		io.to(users[user]).emit('complete');
+		io.to(users[pair]).emit('complete');
+		return;
+	}
+	else{
+		//Request users for files that their pair dont have
+		logging.info('Requesting files from clients');
+
+		//Fetching files to be transfered to their pairs from users
+		if(getFromUser.length)
+			io.to(users[user]).emit('sendFile', getFromUser);
+		if(getFromPair.length)
+			io.to(users[pair]).emit('sendFile', getFromPair);
+	}
+}
+
+var checkPairOnlineAsync = promise.promisify(checkPairOnline);
+
+//check if the pair in online
+function checkPairOnline(users, socket, cb){
+	if(!users[socket.pair]){
+		var err = new Error('Pair offline');
+		err.event = 'offline';
+		return cb(err);
+	}
+	return cb();
+}
+
+var validatePairInfoAsync = promise.promisify(validatePairInfo);
+
+// check if socket has the pair name
+function validatePairInfo(socket, cb){
+	if(!socket.pair) {
+		var err = new Error('No pair info found');
+		return cb(err);
+	}
+	return cb();
+}
+
+function emitErrorEvent(socket, error){
+	if(!error.event){
+		error.event = 'error';
+	}
+	if(!error.message){
+		error.message = 'Something Went Wrong';
+	}
+	logging.error('error', error.message);
+	socket.emit(error.event, error.message);
+}
+
+var emitOnlineStatusAsync = promise.promisify(emitOnlineStatus);
+
+//Tell the pair that both are online
+function emitOnlineStatus(io, socket, users, cb){
+
+	//Emit event to clients about online info.
+	io.to(users[socket.user]).emit('pairOnline', socket.pair+' is Online.');
+	io.to(users[socket.pair]).emit('pairOnline', socket.user+' is Online.');
+
+	cb();
+}
+
+function filesToFetch(userFiles, to, from){
+	var files = [];
+	for(var key in userFiles[from]){
+		if(!userFiles[to][key]){
+			files.push(key);
+		}
+		// check if the file has been modified by the pair lately
+		else if(userFiles[to][key].md5 != userFiles[from][key].md5){
+			if(userFiles[to][key].last_modified < userFiles[from][key].last_modified){
+				files.push(key);
+			}
+		}
+	}
+
+	return files;
 }
