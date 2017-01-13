@@ -12,6 +12,11 @@ var logging = require('../logger');
 var data_dir_default = path.join(__dirname, './data');
 var data_dir = (process.env.DATA_DIR, data_dir_default);
 
+if(!process.env.PAIR || !process.env.USER){
+	console.log('Provide user and pair unique identifiers');
+	return;
+}
+
 //Promisifying functions
 promise.promisifyAll(fs);
 var recursiveAsync = promise.promisify(recursive);
